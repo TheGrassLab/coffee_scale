@@ -2,18 +2,18 @@
   #include <Wire.h>
   #include "SparkFun_Qwiic_Scale_NAU7802_Arduino_Library.h" // Click here to get the library: http://librarymanager/All#SparkFun_NAU8702
   #include <Adafruit_SSD1306.h>
-  #include <RunningAverage.h>
 
 //variables for scale 
   NAU7802 myScale; //Create instance of the NAU7802 class
-  float scale_offset = 0;
-  float scale_slope = 1;
+  float scale_slope = 0.001;
   float scale_g;
-  int interval_meas = 100;
-  zero_offset = 0;
-
-//Create an array to take average of weights. This helps smooth out jitter.
-  RunningAverage SW(10);
+  float zero_offset = 0;
+  int n_array = 50;
+  float mass_array[50];
+  float raw_offset;
+  float mass_avg;
+  float sum_g;
+  float sum_raw = 0;
   
 //for SSD1306 I2C OLED Display
   #define SCREEN_WIDTH 128 //lower if RAM malfunctions
@@ -23,16 +23,20 @@
 // variables for timer
   unsigned long previousMillis = 0; // For storing previous timestep
   unsigned long previousMs_meas = 0; // For storing previous timestep
-  int interval_display = 1000;        // speed the sketch runs (ms)
+  unsigned long timerMillis = 0; // For storing previous timestep
+  int interval_display = 500;        // speed the sketch runs (ms)
+  int interval_meas = 10;
   int count = 0;
+  bool timer = false;
 
 //variables for push-button control
-#define buttonPin 5        // analog input pin to use as a digital input
-
+int buttonPin = 12;        // analog input pin to use as a digital input
+int b;
 
 void setup()
 {
-  Serial.begin(9600);
+
+  Serial.begin(115200);
 
   Wire.begin();
   Wire.setClock(100); //Qwiic Scale is capable of running at 400kHz if desired
@@ -47,13 +51,15 @@ void setup()
   myScale.setSampleRate(NAU7802_SPS_320); //Increase to max sample rate
   //myScale.calibrateAFE(); //Re-cal analog front end when we change gain, sample rate, or channel 
 
+  raw_offset = zero();
+  
         //OLED setup
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C )) {
     Serial.println(F("SSD1306 allocation failed"));
     for(;;); // Don't proceed, loop forever
   }
   //set additional display parameters
-    display.setTextSize(2);      // Normal 1:1 pixel scale
+    display.setTextSize(1);      // Normal 1:1 pixel scale
     display.setTextColor(SSD1306_WHITE); // Draw white text
 
     // Show initial display buffer contents on the screen --
@@ -65,63 +71,132 @@ void setup()
   display.clearDisplay();
   display.write("Running Setup");display.display();
 
-  SW.clear();
-
   // Set pushbutton input pin
-   pinMode(buttonPin, INPUT);
-   digitalWrite(buttonPin, HIGH );
+   pinMode(buttonPin, INPUT_PULLUP);
+   digitalWrite(buttonPin, HIGH); 
+
 }
+
+float zero(){
+  float sum_raw = 0;
+  float raw;
+  for(int i = 0; i < 50; ++i){
+    //measure mass
+    raw = floor(myScale.getReading()/1000);
+    sum_raw += raw * 1000;
+    delay(40);
+  }
+
+  delay(100);
+
+  sum_raw = 0;
+  for(int i = 0; i < 50; ++i){
+    //measure mass
+    raw = floor(myScale.getReading()/1000);
+    sum_raw += raw * 1000;
+    delay(40);
+  }
+  
+  delay(100);
+
+  sum_raw = 0;
+  for(int i = 0; i < (1000); ++i){
+    //measure mass
+    raw = floor(myScale.getReading()/1000);
+    sum_raw += raw * 1000;
+  }
+  //calculate average
+  raw_offset = sum_raw / 1000;
+  
+  return raw_offset;
+}
+
 
 void loop()
 {
-
+  
   //--Check the elapsed time    
-    unsigned long currentMillis = millis(); 
+  unsigned long currentMillis = millis(); 
+
+  //check pushbutton status
+  b = checkButton();
+   if (b == 1) raw_offset = clickEvent();
+   if (b == 2) doubleClickEvent();
+   if (b == 3) timer = holdEvent(timer);
+   if (b == 4) longHoldEvent();
 
   if ((currentMillis - previousMs_meas) >= interval_meas) {
     previousMs_meas = currentMillis;
-    float scaleRaw = myScale.getReading();
-    scale_g = scaleRaw * scale_slope + scale_offset;
-    SW.addValue(scale_g);
+    sum_g = 0;
+    
+    //populate array with new mass data
+    for(int i = 0; i < (n_array-1); ++i){
+      //measure mass
+      float scaleRaw = floor(myScale.getReading()/1000) ;
+      float scaleClean = (scaleRaw * 1000) - raw_offset;
+      scale_g = scaleClean * scale_slope;
+      mass_array[i] = scale_g ;
+      sum_g += scale_g;
+    }
+    //calculate average
+    mass_avg = sum_g / n_array;
   }
 
   if ((currentMillis - previousMillis) >= interval_display) {
       // ..If yes, save current time.  Then update the LED pin and LED state.
     previousMillis = currentMillis;  //reset previous time for interval
-    float avgWeight = 0;
 
-    Serial.print("AvgWeight: ");Serial.println(SW.getAverage(), 2); //Print 2 decimal places
-    Serial.print("Mass");Serial.println(scale_g);
-    
-    int minute = floor((currentMillis - previousMillis)/(1000*60));
-    int second = floor((currentMillis - previousMillis)/(60) - minute*60);
-    
-    display.clearDisplay(); display.setCursor(0, 0);
-    display.write("Wt;");display.print(SW.getAverage(), 2);display.println();
-    display.write("Timer: ");display.print(minute);display.write(":"); display.println(second);
+    if(timer == true){
+      timerMillis = timerMillis;
+    }else{
+      timerMillis = currentMillis;
+    }
+
+    int minute = floor((currentMillis - timerMillis)/(1000*60));
+    int second = floor((currentMillis - timerMillis)/(1000) - minute*60);
+
+    Serial.print("AvgWeight: ");Serial.println(mass_avg, 2); //Print 2 decimal places
+    Serial.print("timer:  ");Serial.println(timer);
+
+    display.clearDisplay(); 
+    display.setCursor(40,0);display.setTextSize(1);display.write("MASS (g)");
+    display.setCursor(35,10); display.setTextSize(2);display.print(mass_avg, 1);
+    display.setCursor(30,35);display.setTextSize(1);display.write("TIMER (mm:ss) ");
+    display.setCursor(40,45);display.setTextSize(2);display.print(minute);display.write(":"); display.print(second);
     display.display();
   }
   
+
 }
 
 //=================================================
 // Events to trigger
 
 //zero the balance
-void clickEvent() {
-   //zero_offset = average
+float clickEvent() {
+   Serial.println();
+   Serial.println("click event");
+   Serial.println();
+   float clck_zero = zero();
+   return clck_zero;
+   delay(500);
 }
 void doubleClickEvent() {
-   ledVal2 = !ledVal2;
-   digitalWrite(ledPin2, ledVal2);
+
 }
-void holdEvent() {
-   ledVal3 = !ledVal3;
-   digitalWrite(ledPin3, ledVal3);
+bool holdEvent(bool clck_timer) {
+  Serial.println();
+  Serial.println("hold event");
+  Serial.println();
+  if(clck_timer == true){
+    clck_timer = false;
+  }else{
+    clck_timer = true;
+  }
+  return clck_timer;
 }
 void longHoldEvent() {
-   ledVal4 = !ledVal4;
-   digitalWrite(ledPin4, ledVal4);
+
 }
 //=================================================
 //  MULTI-CLICK:  One Button, Multiple Events
@@ -209,3 +284,6 @@ int checkButton() {
    buttonLast = buttonVal;
    return event;
 }
+
+
+
